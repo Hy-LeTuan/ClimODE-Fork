@@ -105,8 +105,8 @@ def get_train_test_data_without_scales_batched(data_path, train_time_scale, val_
     if lev in ["v", "u", "r", "q", "tisr"]:
         data = data.sel(level=500)
 
-    data = data.resample(time="6H").nearest(
-        tolerance="1H")  # Setting data to be 6-hour cycles
+    data = data.resample(time="6h").nearest(
+        tolerance="1h")  # Setting data to be 6-hour cycles
 
     # 2006 -> 2015
     data_train = data.sel(time=train_time_scale).load()
@@ -370,11 +370,24 @@ def add_constant_info_region(path, region, H, W):
 
 
 def get_delta_u(u_vel, t_steps):
+    """
+    function: 
+    Get the gradient of the current quantities 
+
+    arguments: 
+    u_vel: The past data points of all quantities taken from data loader that are next to each other 
+    t_steps: The acutal index of the data points in the whole training data
+    """
     levels = ["z", "t", "t2m", "u10", "v10", "tisr", "v", "u", "r", "q"]
+
+    # convert time intervals to hours in 24 hours system
     t = t_steps.flatten().float()*6
     title = {"z": "Geopotential", "v10": "v component of wind at 10m", "u10": "u component of wind at 10m",
              "t2m": "Temperature at 2m", "t": "Temperature at 850hPa pressure"}
+
+    # flatten u_vel but still keeping the years and num_of_data dimensions
     input_u_vel = u_vel.view(u_vel.shape[0], u_vel.shape[1], -1)
+
     coeffs = natural_cubic_spline_coeffs(t, input_u_vel)
     spline = NaturalCubicSpline(coeffs)
     point = t[-1]
@@ -386,6 +399,9 @@ def get_delta_u(u_vel, t_steps):
 
 def get_gauss_kernel(shape, lat, lon):
     cwd = os.getcwd()
+    if os.path.exists(str(cwd) + "/kernel.npy"):
+        return
+
     rows, columns = shape
     kernel = torch.zeros(shape[0]*shape[1], shape[0]*shape[1])
     pos = []
@@ -399,6 +415,7 @@ def get_gauss_kernel(shape, lat, lon):
             kernel[i][j] = torch.exp(-dist/(2*1*1))
 
     kernel_inv = torch.linalg.inv(kernel).numpy()
+    print("arrived at saving kernel")
     np.save(str(cwd) + "/kernel.npy", kernel_inv)
 
 
@@ -450,24 +467,63 @@ def optimize_vel(num, data, delta_u, vel_model, kernel, H, W, steps=200):
 
 
 def fit_velocity(time_idx, time_loader, Final_train_data, data_loader, device, num_years, paths_to_data, scale, H, W, types, vel_model, kernel, lat, lon):
+    """
+    function: 
+    find the intial velocity to kickstart the ODE solvers 
+
+    arguments
+    time_idx: number of days in 4 years as a DataLoader
+    time_loader: number of days in 4 years as a DataLoader
+    Final_train_data: training / testing / validation data  
+    data_loader: appropriate loader for specific data
+    device: torch.device()
+    num_years: the number of years present in Final_train_data (10 / 2 / 1)
+    paths_to_data: list of paths to 5 quantities present in training data 
+    scale: the extra number of quantities added in to train the model
+    H: latitude coordinates (32) 
+    W: longitude coordinates (64) 
+    types: type of data used in the function (train / val / test)
+    vel_model: 
+    kernel: 
+    """
     num = 0
     cwd = os.getcwd()
     for idx_steps, time_steps, batch in zip(time_idx, time_loader, data_loader):
+        # idx_steps and time_steps are the same
+
+        # pst and pst_idx are days separated by batch_size interval and taken intervals backwards
         pst = [time_steps[0].item()-i for i in range(3)]
         pst.reverse()
         pst_idx = [idx_steps[0].item()-i for i in range(3)]
         pst_idx.reverse()
+
+        # print(f"pst: {pst} || pst_idx: {pst_idx}")
+        # print(f"batch: {batch.shape}")
+
         past_time = torch.tensor(pst).to(device)
+
+        # (8, 10, 5, 32, 64) -> (10, 1, 5 ,32, 64)
         data = batch[0].to(device).view(
             num_years, 1, len(paths_to_data)*(scale+1), H, W)
+
+        # take the past samples of the data from 2 previous intervals and itself
         past_sample = [Final_train_data[j].view(
             num_years, -1, len(paths_to_data)*(scale+1), H, W) for j in pst_idx]
         past_sample = torch.stack(past_sample).view(
-            num_years, 3, -1, H, W).to(device)
+            num_years, 3, -1, H, W).to(device)  # (10, 3, 5, 32, 64)
+
+        # comparison = torch.equal(Final_train_data[pst_idx[-1]
+        #                                           ].view(num_years, -1, 5, 32, 64), data) -> true
+
+        # print(f"data: {data.shape} || past_sample: {past_sample.shape}")
+        # print(f"past time: {past_time} || past_sample: {past_sample.shape}")
+
         delta_u = get_delta_u(past_sample, past_time)
+
         v_x, v_y, loss_terms, out = optimize_vel(
             num_years, data, delta_u, vel_model, kernel, H, W)
         final_v = torch.cat([v_x, v_y], dim=1).unsqueeze(dim=0)
+
         if num == 0:
             Final_v = final_v
         else:
