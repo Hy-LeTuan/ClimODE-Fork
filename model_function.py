@@ -20,7 +20,7 @@ class Optim_velocity(nn.Module):
         u_y = torch.gradient(data, dim=3)[0]  # (H,W) --> (y,x)
         u_x = torch.gradient(data, dim=4)[0]
 
-        # compute advection = v \cdot nabla u + u \nabla \cdot v
+        # compute advection term in velocity identity to estimate initial velocity
         adv = self.v_x*u_x + self.v_y*u_y + data * \
             (torch.gradient(self.v_y, dim=3)[
              0] + torch.gradient(self.v_x, dim=4)[0])

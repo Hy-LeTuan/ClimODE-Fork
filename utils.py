@@ -372,7 +372,7 @@ def add_constant_info_region(path, region, H, W):
 def get_delta_u(u_vel, t_steps):
     """
     function: 
-    Get the gradient of the current quantities 
+    Get the gradient of the current quantities at the first time step of the batch
 
     arguments: 
     u_vel: The past data points of all quantities taken from data loader that are next to each other 
@@ -382,17 +382,26 @@ def get_delta_u(u_vel, t_steps):
 
     # convert time intervals to hours in 24 hours system
     t = t_steps.flatten().float()*6
+    print(f"in fit_veloicty utils: {t}")
     title = {"z": "Geopotential", "v10": "v component of wind at 10m", "u10": "u component of wind at 10m",
              "t2m": "Temperature at 2m", "t": "Temperature at 850hPa pressure"}
 
     # flatten u_vel but still keeping the years and num_of_data dimensions
     input_u_vel = u_vel.view(u_vel.shape[0], u_vel.shape[1], -1)
 
+    # using cubic spline to smoothen out the initial input
     coeffs = natural_cubic_spline_coeffs(t, input_u_vel)
     spline = NaturalCubicSpline(coeffs)
+
+    # estimating the gradient of the quantities at the current time step since the past sample overlaps with the first item in the batch
     point = t[-1]
+
+    # (10, 3, 5, 32, 64) -> (10, 5, 32, 64)
     out = spline.derivative(
-        point).view(-1, u_vel.shape[2], u_vel.shape[3], u_vel.shape[4])
+        point)
+    out = out.view(-1, u_vel.shape[2], u_vel.shape[3], u_vel.shape[4])
+
+    print(f"gradient output of quantities: {out.shape}")
 
     return out
 
@@ -438,6 +447,16 @@ def get_gauss_kernel_region(shape, lat, lon, region):
 
 
 def optimize_vel(num, data, delta_u, vel_model, kernel, H, W, steps=200):
+    """
+    arguments: 
+    num: number of years present in the type of dataset
+    data: first item of data in batch
+    delta_u: the gradient of the current data
+    vel_model: the velocity model for optimization
+    kernel: the Gaussian kernel 
+    H: latitude height 
+    W: longitude width 
+    """
     model = vel_model(num, H, W)
     optimizer = optim.Adam(model.parameters(), lr=2)
     best_loss = float('inf')
@@ -483,7 +502,7 @@ def fit_velocity(time_idx, time_loader, Final_train_data, data_loader, device, n
     H: latitude coordinates (32) 
     W: longitude coordinates (64) 
     types: type of data used in the function (train / val / test)
-    vel_model: 
+    vel_model: Optim_velocity module
     kernel: 
     """
     num = 0
@@ -518,10 +537,11 @@ def fit_velocity(time_idx, time_loader, Final_train_data, data_loader, device, n
         # print(f"data: {data.shape} || past_sample: {past_sample.shape}")
         # print(f"past time: {past_time} || past_sample: {past_sample.shape}")
 
-        delta_u = get_delta_u(past_sample, past_time)
+        delta_u = get_delta_u(past_sample, past_time)  # (10, 5, 32, 64)
 
         v_x, v_y, loss_terms, out = optimize_vel(
             num_years, data, delta_u, vel_model, kernel, H, W)
+
         final_v = torch.cat([v_x, v_y], dim=1).unsqueeze(dim=0)
 
         if num == 0:
